@@ -1,11 +1,14 @@
 mod server;
 
-use std::{error::Error, net::{SocketAddr, IpAddr, Ipv4Addr}};
+use std::{
+    error::Error,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
 
 use clap::Parser;
 use flexi_logger::Logger;
 use log::info;
-use tokio::net::UdpSocket;
 
 use crate::server::UdpTracker;
 
@@ -24,12 +27,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.port);
-    let socket = UdpSocket::bind(addr).await?;
 
-    info!("Listening on: {}", socket.local_addr()?);
+    info!("Osiris version 0.1 - Torrent tracker");
 
-    let udp_tracker = UdpTracker::new(socket)?;
-    udp_tracker.process().await?;
+    let udp_tracker = Arc::new(UdpTracker::new(addr).await?);
+    udp_tracker.run().await?;
 
     Ok(())
 }

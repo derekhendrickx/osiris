@@ -1,8 +1,15 @@
-use std::{io, time::SystemTime, net::SocketAddr};
+use std::{io, net::SocketAddr, sync::Arc, time::SystemTime};
 
-use bincode::{self, Options, config::{WithOtherTrailing, WithOtherIntEncoding, WithOtherEndian, BigEndian, FixintEncoding, AllowTrailing}, DefaultOptions};
+use bincode::{
+    self,
+    config::{
+        AllowTrailing, BigEndian, FixintEncoding, WithOtherEndian, WithOtherIntEncoding,
+        WithOtherTrailing,
+    },
+    DefaultOptions, Options,
+};
 use log::{debug, error, info};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 
 // Magic constant from https://www.bittorrent.org/beps/bep_0015.html
@@ -39,62 +46,95 @@ struct TrackerErrorResponsePacket {
 }
 
 pub struct UdpTracker {
-    bincode_config: WithOtherTrailing<WithOtherIntEncoding<WithOtherEndian<DefaultOptions, BigEndian>, FixintEncoding>, AllowTrailing>,
-    socket: UdpSocket,
+    // TODO: There must be a better way to store the bincode config
+    bincode_config: WithOtherTrailing<
+        WithOtherIntEncoding<WithOtherEndian<DefaultOptions, BigEndian>, FixintEncoding>,
+        AllowTrailing,
+    >,
+    pub socket: UdpSocket,
 }
 
 impl UdpTracker {
-    pub fn new(socket: UdpSocket) -> Result<UdpTracker, io::Error> {
+    pub async fn new(addr: SocketAddr) -> Result<UdpTracker, io::Error> {
         let bincode_config = bincode::DefaultOptions::new()
             .with_big_endian()
             .with_fixint_encoding()
             .allow_trailing_bytes();
+        let socket = UdpSocket::bind(addr).await?;
 
-        Ok(UdpTracker{
+        Ok(UdpTracker {
             bincode_config,
             socket,
         })
     }
 
-    pub async fn process(&self) -> Result<(), io::Error> {
-        let mut buffer = [0; 1024];
+    pub async fn run(self: Arc<Self>) -> Result<(), io::Error> {
+        info!("Listening on: {}", self.socket.local_addr()?);
 
         loop {
-            let (len, addr) = self.socket.recv_from(&mut buffer).await?;
-            debug!("{:?} bytes received from {:?}", len, addr);
-            let tracker_packet_header: TrackerPacketHeader = self.bincode_config.deserialize(&buffer).unwrap();
+            let server = Arc::clone(&self);
 
-            match tracker_packet_header.action {
-                TrackerAction::Connect => self.handle_connect(addr, tracker_packet_header).await?,
-                _ => info!("TODO"),
-            }
+            tokio::spawn(async move {
+                server.process().await.unwrap();
+            });
         }
     }
 
-    async fn handle_connect(&self, addr: SocketAddr, tracker_packet_header: TrackerPacketHeader) -> Result<(), io::Error> {
-        debug!("{:?}", tracker_packet_header);
-        let response: Vec<u8>;
+    pub async fn process(&self) -> Result<(), io::Error> {
+        let mut buffer = [0; 1024];
 
-        if tracker_packet_header.connection_id != PROTOCOL_ID {
-            error!("Error: {:?} is not a valid protocol ID", tracker_packet_header.connection_id);
-            let tracker_error_response_packet = TrackerErrorResponsePacket{
+        let (len, addr) = self.socket.recv_from(&mut buffer).await?;
+        debug!("{:?} bytes received from {:?}", len, addr);
+        match self
+            .bincode_config
+            .deserialize::<TrackerPacketHeader>(&buffer)
+        {
+            Ok(tracker_packet_header) => match tracker_packet_header.action {
+                TrackerAction::Connect => self.handle_connect(addr, tracker_packet_header).await?,
+                TrackerAction::Announce => todo!(),
+                TrackerAction::Scrape => todo!(),
+                _ => unimplemented!(),
+            },
+            Err(_) => error!("Invalid packet"),
+        }
+
+        Ok(())
+    }
+
+    async fn handle_connect(
+        &self,
+        addr: SocketAddr,
+        tracker_packet_header: TrackerPacketHeader,
+    ) -> Result<(), io::Error> {
+        debug!("{:?}", tracker_packet_header);
+
+        let response: Vec<u8> = if tracker_packet_header.connection_id != PROTOCOL_ID {
+            error!(
+                "Error: {:?} is not a valid protocol ID",
+                tracker_packet_header.connection_id
+            );
+            let tracker_error_response_packet = TrackerErrorResponsePacket {
                 action: TrackerAction::Error,
                 transaction_id: tracker_packet_header.transaction_id,
                 error_string: String::from("Not a valid protocol ID"),
             };
             debug!("{:?}", tracker_error_response_packet);
 
-            response = self.bincode_config.serialize(&tracker_error_response_packet).unwrap();
+            self.bincode_config
+                .serialize(&tracker_error_response_packet)
+                .unwrap()
         } else {
-            let tracker_connect_response_packet = TrackerConnectResponsePacket{
+            let tracker_connect_response_packet = TrackerConnectResponsePacket {
                 action: TrackerAction::Connect,
                 transaction_id: tracker_packet_header.transaction_id,
                 connection_id: generate_connection_id(addr),
             };
             debug!("{:?}", tracker_connect_response_packet);
 
-            response = self.bincode_config.serialize(&tracker_connect_response_packet).unwrap();
-        }
+            self.bincode_config
+                .serialize(&tracker_connect_response_packet)
+                .unwrap()
+        };
 
         let len = self.socket.send_to(&response, addr).await?;
         debug!("{:?} bytes sent: {:?}", len, response);
@@ -113,11 +153,13 @@ fn generate_connection_id(addr: SocketAddr) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use bincode::Options;
 
-    use crate::server::{TrackerPacketHeader, TrackerConnectResponsePacket, PROTOCOL_ID, generate_connection_id};
+    use crate::server::{
+        generate_connection_id, TrackerConnectResponsePacket, TrackerPacketHeader, PROTOCOL_ID,
+    };
 
     #[test]
     fn it_deserialize_connect_request() {
@@ -134,11 +176,14 @@ mod tests {
 
         let tracker_packet_header: TrackerPacketHeader = options.deserialize(&buffer).unwrap();
 
-        assert_eq!(tracker_packet_header, TrackerPacketHeader{
-            connection_id: PROTOCOL_ID,
-            action: 0,
-            transaction_id: 42,
-        });
+        assert_eq!(
+            tracker_packet_header,
+            TrackerPacketHeader {
+                connection_id: PROTOCOL_ID,
+                action: 0,
+                transaction_id: 42,
+            }
+        );
     }
 
     #[test]
@@ -148,7 +193,7 @@ mod tests {
             .with_fixint_encoding()
             .allow_trailing_bytes();
 
-        let tracker_connect_response_packet = TrackerConnectResponsePacket{
+        let tracker_connect_response_packet = TrackerConnectResponsePacket {
             action: 0,
             transaction_id: 1,
             connection_id: 1,
