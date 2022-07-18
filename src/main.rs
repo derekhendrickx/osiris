@@ -3,7 +3,6 @@ mod server;
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
 };
 
 use clap::Parser;
@@ -25,12 +24,13 @@ struct Args {
 async fn main() -> Result<(), Box<dyn Error>> {
     Logger::try_with_str("debug")?.start()?;
 
-    let args = Args::parse();
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.port);
-
     info!("Osiris version 0.1 - Torrent tracker");
 
-    let udp_tracker = Arc::new(UdpTracker::new(addr).await?);
+    let args = Args::parse();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.port);
+    let udp_tracker = UdpTracker::new(addr).await?;
+    info!("Listening on: {}", udp_tracker.socket.local_addr()?);
+
     udp_tracker.run().await?;
 
     Ok(())

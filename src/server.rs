@@ -8,7 +8,7 @@ use bincode::{
     },
     DefaultOptions, Options,
 };
-use log::{debug, error, info};
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 
@@ -68,26 +68,29 @@ impl UdpTracker {
         })
     }
 
-    pub async fn run(self: Arc<Self>) -> Result<(), io::Error> {
-        info!("Listening on: {}", self.socket.local_addr()?);
+    pub async fn run(self) -> Result<(), io::Error> {
+        let udp_tracker = Arc::new(self);
 
         loop {
-            let server = Arc::clone(&self);
+            let mut buffer = [0; 1024];
+            let udp_tracker = udp_tracker.clone();
+
+            // TODO: Figure out if channels are needed
+            // let (tx, mut rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1_000);
+
+            let (len, addr) = udp_tracker.socket.recv_from(&mut buffer).await?;
+            debug!("{:?} bytes received from {:?}", len, addr);
 
             tokio::spawn(async move {
-                server.process().await.unwrap();
+                udp_tracker.process(&addr, &buffer).await.unwrap();
             });
         }
     }
 
-    pub async fn process(&self) -> Result<(), io::Error> {
-        let mut buffer = [0; 1024];
-
-        let (len, addr) = self.socket.recv_from(&mut buffer).await?;
-        debug!("{:?} bytes received from {:?}", len, addr);
+    pub async fn process(&self, addr: &SocketAddr, packet: &[u8; 1024]) -> Result<(), io::Error> {
         match self
             .bincode_config
-            .deserialize::<TrackerPacketHeader>(&buffer)
+            .deserialize::<TrackerPacketHeader>(packet)
         {
             Ok(tracker_packet_header) => match tracker_packet_header.action {
                 TrackerAction::Connect => self.handle_connect(addr, tracker_packet_header).await?,
@@ -103,7 +106,7 @@ impl UdpTracker {
 
     async fn handle_connect(
         &self,
-        addr: SocketAddr,
+        addr: &SocketAddr,
         tracker_packet_header: TrackerPacketHeader,
     ) -> Result<(), io::Error> {
         debug!("{:?}", tracker_packet_header);
@@ -143,7 +146,7 @@ impl UdpTracker {
     }
 }
 
-fn generate_connection_id(addr: SocketAddr) -> u64 {
+fn generate_connection_id(addr: &SocketAddr) -> u64 {
     debug!("{:?} - {:?}", rand::random::<u32>(), addr.ip());
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => n.as_secs(),
