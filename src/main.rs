@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Osiris version 0.1 - Torrent tracker");
 
     let args = Args::parse();
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.port);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
     let udp_tracker = UdpTracker::new(addr).await?;
     info!("Listening on: {}", udp_tracker.socket.local_addr()?);
 

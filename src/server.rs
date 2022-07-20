@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, sync::Arc, time::SystemTime};
+use std::{io, net::{SocketAddr, IpAddr, Ipv4Addr}, sync::Arc, time::SystemTime};
 
 use bincode::{
     self,
@@ -24,6 +24,15 @@ enum TrackerAction {
     Error = 3,
 }
 
+#[repr(u32)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+enum TrackerEvent {
+    None = 0,
+    Completed = 1,
+    Started = 2,
+    Stopped = 3,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct TrackerPacketHeader {
     connection_id: u64,
@@ -36,6 +45,32 @@ struct TrackerConnectResponsePacket {
     action: TrackerAction,
     transaction_id: u32,
     connection_id: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct TrackerAnnounceRequestPacket {
+    header: TrackerPacketHeader,
+    info_hash: [u8; 20],
+    peer_id: [u8; 20],
+    downloaded: u64,
+    left: u64,
+    uploaded: u64,
+    event: TrackerEvent,
+    ip_address: u32,
+    key: u32,
+    num_want: u32,
+    port: u16,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct TrackerAnnounceResponsePacket {
+    action: TrackerAction,
+    transaction_id: u32,
+    interval: u32,
+    leechers: u32,
+    seeders: u32,
+    ip_address: u32,
+    port: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -94,7 +129,7 @@ impl UdpTracker {
         {
             Ok(tracker_packet_header) => match tracker_packet_header.action {
                 TrackerAction::Connect => self.handle_connect(addr, tracker_packet_header).await?,
-                TrackerAction::Announce => todo!(),
+                TrackerAction::Announce => self.handle_announce(addr, tracker_packet_header, packet).await?,
                 TrackerAction::Scrape => todo!(),
                 _ => unimplemented!(),
             },
@@ -138,6 +173,70 @@ impl UdpTracker {
                 .serialize(&tracker_connect_response_packet)
                 .unwrap()
         };
+
+        let len = self.socket.send_to(&response, addr).await?;
+        debug!("{:?} bytes sent: {:?}", len, response);
+
+        Ok(())
+    }
+
+    async fn handle_announce(
+        &self,
+        addr: &SocketAddr,
+        tracker_packet_header: TrackerPacketHeader,
+        payload: &[u8; 1024]
+    ) -> Result<(), io::Error> {
+        debug!("{:?}", tracker_packet_header);
+        let response: Vec<u8>;
+
+        match self
+            .bincode_config
+            .deserialize::<TrackerAnnounceRequestPacket>(payload)
+        {
+            Ok(tracker_announce_request_packet) => {
+                debug!("{:?}", tracker_announce_request_packet);
+
+                let mut ip_address: u32 = 0;
+                if let IpAddr::V4(ipv4) = addr.ip() {
+                    ip_address = ipv4.into();
+                }
+
+                let tracker_announce_response_packet = TrackerAnnounceResponsePacket {
+                    action: TrackerAction::Announce,
+                    transaction_id: tracker_announce_request_packet.header.transaction_id,
+                    interval: 5,
+                    leechers: 0,
+                    seeders: 0,
+                    ip_address,
+                    port: addr.port(),
+                };
+                debug!("{:?}", tracker_announce_response_packet);
+                debug!(
+                    "IP: {:?} - Info hash: {:?} - Peer id: {:?}",
+                    IpAddr::V4(Ipv4Addr::from(tracker_announce_response_packet.ip_address)),
+                    String::from_utf8_lossy(&tracker_announce_request_packet.info_hash),
+                    String::from_utf8_lossy(&tracker_announce_request_packet.peer_id),
+                );
+
+                response = self.bincode_config
+                    .serialize(&tracker_announce_response_packet)
+                    .unwrap();
+            },
+            Err(_) => {
+                error!("Announce error");
+
+                let tracker_error_response_packet = TrackerErrorResponsePacket {
+                    action: TrackerAction::Error,
+                    transaction_id: tracker_packet_header.transaction_id,
+                    error_string: String::from("Announce error"),
+                };
+                debug!("{:?}", tracker_error_response_packet);
+
+                response = self.bincode_config
+                    .serialize(&tracker_error_response_packet)
+                    .unwrap();
+            },
+        }
 
         let len = self.socket.send_to(&response, addr).await?;
         debug!("{:?} bytes sent: {:?}", len, response);
