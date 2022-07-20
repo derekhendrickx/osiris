@@ -1,4 +1,9 @@
-use std::{io, net::{SocketAddr, IpAddr, Ipv4Addr}, sync::Arc, time::SystemTime};
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::SystemTime,
+};
 
 use bincode::{
     self,
@@ -14,6 +19,7 @@ use tokio::net::UdpSocket;
 
 // Magic constant from https://www.bittorrent.org/beps/bep_0015.html
 const PROTOCOL_ID: u64 = 0x41727101980;
+const DEFAULT_ANNOUNCE_INTERVAL: u32 = 10 * 60 * 1000; // 10 minutes
 
 #[repr(u32)]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -74,6 +80,22 @@ struct TrackerAnnounceResponsePacket {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct TrackerScrapeRequestPacket {
+    header: TrackerPacketHeader,
+    info_hash: [u8; 20],
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct TrackerScrapeResponsePacket {
+    action: TrackerAction,
+    transaction_id: u32,
+    info_hash: [u8; 20],
+    seeders: u32,
+    completed: u32,
+    leechers: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct TrackerErrorResponsePacket {
     action: TrackerAction,
     transaction_id: u32,
@@ -129,8 +151,14 @@ impl UdpTracker {
         {
             Ok(tracker_packet_header) => match tracker_packet_header.action {
                 TrackerAction::Connect => self.handle_connect(addr, tracker_packet_header).await?,
-                TrackerAction::Announce => self.handle_announce(addr, tracker_packet_header, packet).await?,
-                TrackerAction::Scrape => todo!(),
+                TrackerAction::Announce => {
+                    self.handle_announce(addr, tracker_packet_header, packet)
+                        .await?
+                }
+                TrackerAction::Scrape => {
+                    self.handle_scrape(addr, tracker_packet_header, packet)
+                        .await?
+                }
                 _ => unimplemented!(),
             },
             Err(_) => error!("Invalid packet"),
@@ -184,12 +212,11 @@ impl UdpTracker {
         &self,
         addr: &SocketAddr,
         tracker_packet_header: TrackerPacketHeader,
-        payload: &[u8; 1024]
+        payload: &[u8; 1024],
     ) -> Result<(), io::Error> {
         debug!("{:?}", tracker_packet_header);
-        let response: Vec<u8>;
 
-        match self
+        let response: Vec<u8> = match self
             .bincode_config
             .deserialize::<TrackerAnnounceRequestPacket>(payload)
         {
@@ -204,7 +231,7 @@ impl UdpTracker {
                 let tracker_announce_response_packet = TrackerAnnounceResponsePacket {
                     action: TrackerAction::Announce,
                     transaction_id: tracker_announce_request_packet.header.transaction_id,
-                    interval: 5,
+                    interval: DEFAULT_ANNOUNCE_INTERVAL,
                     leechers: 0,
                     seeders: 0,
                     ip_address,
@@ -218,10 +245,10 @@ impl UdpTracker {
                     String::from_utf8_lossy(&tracker_announce_request_packet.peer_id),
                 );
 
-                response = self.bincode_config
+                self.bincode_config
                     .serialize(&tracker_announce_response_packet)
-                    .unwrap();
-            },
+                    .unwrap()
+            }
             Err(_) => {
                 error!("Announce error");
 
@@ -232,11 +259,66 @@ impl UdpTracker {
                 };
                 debug!("{:?}", tracker_error_response_packet);
 
-                response = self.bincode_config
+                self.bincode_config
                     .serialize(&tracker_error_response_packet)
-                    .unwrap();
-            },
-        }
+                    .unwrap()
+            }
+        };
+
+        let len = self.socket.send_to(&response, addr).await?;
+        debug!("{:?} bytes sent: {:?}", len, response);
+
+        Ok(())
+    }
+
+    async fn handle_scrape(
+        &self,
+        addr: &SocketAddr,
+        tracker_packet_header: TrackerPacketHeader,
+        payload: &[u8; 1024],
+    ) -> Result<(), io::Error> {
+        debug!("{:?}", tracker_packet_header);
+
+        let response: Vec<u8> = match self
+            .bincode_config
+            .deserialize::<TrackerScrapeRequestPacket>(payload)
+        {
+            Ok(tracker_scrape_request_packet) => {
+                let info_hash: [u8; 20] = [
+                    0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                    0x0, 0x0, 0x0, 0x0,
+                ];
+                debug!("{:?}", tracker_scrape_request_packet);
+
+                let tracker_scrape_response_packet = TrackerScrapeResponsePacket {
+                    action: TrackerAction::Announce,
+                    transaction_id: tracker_scrape_request_packet.header.transaction_id,
+                    info_hash,
+                    seeders: 0,
+                    completed: 0,
+                    leechers: 0,
+                };
+                debug!("{:?}", tracker_scrape_response_packet);
+
+                self.bincode_config
+                    .serialize(&tracker_scrape_response_packet)
+                    .unwrap()
+            }
+            Err(_) => {
+                error!("Scrape error");
+
+                let tracker_error_response_packet = TrackerErrorResponsePacket {
+                    action: TrackerAction::Error,
+                    transaction_id: tracker_packet_header.transaction_id,
+                    error_string: String::from("Scrape error"),
+                };
+                debug!("{:?}", tracker_error_response_packet);
+
+                self.bincode_config
+                    .serialize(&tracker_error_response_packet)
+                    .unwrap()
+            }
+        };
 
         let len = self.socket.send_to(&response, addr).await?;
         debug!("{:?} bytes sent: {:?}", len, response);
