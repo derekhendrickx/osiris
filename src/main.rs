@@ -9,8 +9,6 @@ use clap::Parser;
 use flexi_logger::Logger;
 use log::info;
 
-use crate::udp_server::server::UdpTracker;
-
 /// Osiris torrent tracker
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -28,10 +26,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.port);
-    let udp_tracker = UdpTracker::new(addr).await?;
-    info!("Listening on: {}", udp_tracker.socket.local_addr()?);
+    // let udp_tracker = UdpTracker::new(addr).await?;
+    // info!("Listening on: {}", udp_tracker.socket.local_addr()?);
 
-    udp_tracker.run().await?;
+    // udp_tracker.run().await?;
 
     Ok(())
 }
