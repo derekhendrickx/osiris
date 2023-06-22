@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::headers::Headers;
-use crate::udp_server::event::Event;
+use crate::udp_server::{event::Event, payload::Payload};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct AnnounceRequest {
@@ -16,4 +16,10 @@ pub struct AnnounceRequest {
     key: u32,
     num_want: u32,
     port: u16,
+}
+
+impl Payload for AnnounceRequest {
+    fn hello(&self) {
+        todo!()
+    }
 }
